@@ -370,6 +370,12 @@ func (ms *MinSSH) prepareLocalTerminal() (err error) {
 	return nil
 }
 
+func (ms *MinSSH) watchSignals() chan os.Signal {
+	sigC := make(chan os.Signal, 1)
+	signal.Notify(sigC, os.Interrupt, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGQUIT)
+	return sigC
+}
+
 type windowChangeReq struct {
 	W, H, Wpx, Hpx uint32
 }
@@ -477,8 +483,11 @@ func (ms *MinSSH) RunInteractive() error {
 		return err
 	}
 
+	sigC := ms.watchSignals()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
+		signal.Stop(sigC)
 		cancel()
 		ms.wg.Wait()
 	}()
@@ -486,8 +495,17 @@ func (ms *MinSSH) RunInteractive() error {
 	ms.invokeResizeTerminal(ctx)
 	ms.invokeInOutPipes()
 
-	err := ms.sess.Wait()
-	ms.printExitMessage(err)
+	sessC := make(chan error)
+	go func() {
+		sessC <- ms.sess.Wait()
+	}()
+
+	select {
+	case <-sigC:
+		fmt.Println("got signal")
+	case err := <-sessC:
+		ms.printExitMessage(err)
+	}
 
 	return nil
 }
