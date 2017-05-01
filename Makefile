@@ -16,6 +16,9 @@ else # macOS
 	SHA256 := shasum
 endif
 
+wildcard-recurse = $(wildcard $1$2)$(foreach d,$(wildcard $1*),$(call wildcard-recurse,$(d)/,$2))
+SOURCES := $(filter-out %_test.go,$(call wildcard-recurse,./,*.go))
+
 PKG_NAME := minssh
 PLATFORMS := $(foreach arch,$(GOX_ARCH),$(addsuffix _$(arch),$(GOX_OS)))
 PLATFORMS_DIR := $(addprefix build/platforms/,$(PLATFORMS))
@@ -25,7 +28,7 @@ OBJECTS := $(addprefix $(RELEASE_PREFIX),$(addsuffix .tar.gz,$(filter-out window
 OBJECTS += $(addprefix $(RELEASE_PREFIX),$(addsuffix .zip,$(filter windows%,$(PLATFORMS))))
 OBJECTS += $(RELEASE_PREFIX)checksums.txt
 
-$(TARGET):
+$(TARGET): $(SOURCES)
 	go build -ldflags \
 		"-X main.commitHash=$$(git rev-parse --short HEAD 2>/dev/null) \
 		 -X main.buildDate=$(DATE) \
