@@ -83,6 +83,10 @@ const (
 	menuEvent             = 0x0008
 	mouseEvent            = 0x0002
 	windowBufferSizeEvent = 0x0004
+
+	errorAccessDenied     syscall.Errno = 5
+	errorInvalidHandle    syscall.Errno = 6
+	errorInvalidParameter syscall.Errno = 87
 )
 
 var kernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -91,6 +95,8 @@ var (
 	procSetConsoleMode             = kernel32.NewProc("SetConsoleMode")
 	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
 	procReadConsoleInput           = kernel32.NewProc("ReadConsoleInputW")
+	procAttachConsole              = kernel32.NewProc("AttachConsole")
+	procAllocConsole               = kernel32.NewProc("AllocConsole")
 )
 
 type sysInfo struct {
@@ -156,6 +162,86 @@ func readConsoleInput(fd uintptr, records []inputRecord) (n dword, err error) {
 	}
 
 	return
+}
+
+func attachConsole(pid dword) (err error) {
+	r1, _, e1 := syscall.Syscall(procAttachConsole.Addr(), 1, uintptr(pid), 0, 0)
+	if r1 == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+
+	return
+
+}
+
+func allocConsole() (err error) {
+	r1, _, e1 := syscall.Syscall(procAllocConsole.Addr(), 0, 0, 0, 0)
+	if r1 == 0 {
+		if e1 != 0 {
+			err = error(e1)
+		} else {
+			err = syscall.EINVAL
+		}
+	}
+
+	return
+}
+
+func isTerminal(fd uintptr) bool {
+	_, err := getConsoleMode(fd)
+	if err != nil {
+		return false
+	}
+	return true
+}
+
+const (
+	conin  string = "CONIN$"
+	conout string = "CONOUT$"
+)
+
+func openTTY() (ttyin, ttyout *os.File, err error) {
+	if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stdout.Fd()) {
+		err = attachConsole(dword(os.Getpid()))
+		if err != nil && err == error(errorInvalidHandle) {
+			err = allocConsole()
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	if isTerminal(os.Stdin.Fd()) {
+		ttyin = os.Stdin
+	} else {
+		ttyin, err = os.OpenFile(conin, os.O_RDWR, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if isTerminal(os.Stdout.Fd()) {
+		ttyout = os.Stdout
+	} else {
+		ttyout, err = os.OpenFile(conout, os.O_RDWR, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return
+}
+
+func closeTTY(ttyin, ttyout *os.File) {
+	if ttyin != os.Stdin {
+		ttyin.Close()
+	}
+	if ttyout != os.Stdout {
+		ttyout.Close()
+	}
 }
 
 func (ms *MinSSH) changeLocalTerminalMode() error {

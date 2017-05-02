@@ -13,6 +13,8 @@ type Config struct {
 	Logger          *log.Logger
 	KnownHostsFiles []string
 	IdentityFiles   []string
+	Command         string
+	IsSubsystem     bool
 	NoTTY           bool
 }
 

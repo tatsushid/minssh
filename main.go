@@ -100,6 +100,7 @@ func (a *app) parseArgs() (err error) {
 
 	a.flagSet.Var((*strSliceValue)(&a.conf.IdentityFiles), "i", "use `identity_file` for public key authentication. this can be called multiple times")
 	a.flagSet.IntVar(&a.conf.Port, "p", 22, "specify ssh server `port`")
+	a.flagSet.BoolVar(&a.conf.IsSubsystem, "s", false, "treat command as subsystem")
 	a.flagSet.StringVar(&logPath, "E", "", "specify `log_file` path. if it isn't set, it discards all log outputs")
 	a.flagSet.BoolVar(&useOpenSSHFiles, "U", false, "use keys and known_hosts files in OpenSSH's '.ssh' directory")
 	a.flagSet.BoolVar(&a.conf.NoTTY, "T", false, "disable pseudo-terminal allocation")
@@ -155,20 +156,19 @@ func (a *app) parseArgs() (err error) {
 	if i := strings.Index(userHost, "@"); i != -1 {
 		a.conf.User = userHost[:i]
 		a.conf.Host = userHost[i+1:]
-		return
+	} else {
+		a.conf.Host = userHost
 	}
 
-	a.conf.Host = userHost
+	if a.flagSet.NArg() > 1 {
+		a.conf.Command = strings.Join(a.flagSet.Args()[1:], " ")
+	}
+
 	return
 }
 
 func (a *app) run() (exitCode int) {
 	exitCode = 1
-
-	if ok, err := minssh.IsTerminal(); !ok {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
 
 	err := a.initApp()
 	if err != nil {
@@ -185,6 +185,13 @@ func (a *app) run() (exitCode int) {
 		return
 	}
 
+	if a.conf.Command == "" && !a.conf.NoTTY {
+		if ok, err := minssh.IsTerminal(); !ok {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+	}
+
 	ms, err := minssh.Open(a.conf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -192,7 +199,7 @@ func (a *app) run() (exitCode int) {
 	}
 	defer ms.Close()
 
-	err = ms.RunInteractive()
+	err = ms.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return

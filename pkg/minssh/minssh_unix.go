@@ -13,8 +13,41 @@ import (
 	"golang.org/x/crypto/ssh/terminal"
 )
 
+const (
+	pathTTY string = "/dev/tty"
+)
+
 type sysInfo struct {
 	origMode *terminal.State
+}
+
+func openTTY() (ttyin, ttyout *os.File, err error) {
+	if terminal.IsTerminal(int(os.Stdin.Fd())) {
+		ttyin = os.Stdin
+	} else {
+		ttyin, err = os.OpenFile(pathTTY, os.O_RDWR, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if terminal.IsTerminal(int(os.Stdout.Fd())) {
+		ttyout = os.Stdout
+	} else {
+		ttyout, err = os.OpenFile(pathTTY, os.O_RDWR, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return
+}
+
+func closeTTY(ttyin, ttyout *os.File) {
+	if ttyin != os.Stdin {
+		ttyin.Close()
+	}
+	if ttyout != os.Stdout {
+		ttyout.Close()
+	}
 }
 
 func (ms *MinSSH) changeLocalTerminalMode() (err error) {

@@ -52,8 +52,8 @@ func IsTerminal() (bool, error) {
 	return true, nil
 }
 
-func readPassword(prompt string) (password string, err error) {
-	state, err := terminal.GetState(int(os.Stdin.Fd()))
+func readPassword(ttyin, ttyout *os.File, prompt string) (password string, err error) {
+	state, err := terminal.GetState(int(ttyin.Fd()))
 	if err != nil {
 		return "", fmt.Errorf("failed to get terminal state: %s", err)
 	}
@@ -68,24 +68,24 @@ func readPassword(prompt string) (password string, err error) {
 		signal.Notify(sigC, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 		select {
 		case <-sigC:
-			terminal.Restore(int(os.Stdin.Fd()), state)
+			terminal.Restore(int(ttyin.Fd()), state)
 			os.Exit(1)
 		case <-stopC:
 		}
 	}()
 
 	if prompt == "" {
-		fmt.Print("Password: ")
+		fmt.Fprint(ttyout, "Password: ")
 	} else {
-		fmt.Print(prompt)
+		fmt.Fprint(ttyout, prompt)
 	}
 
-	b, err := terminal.ReadPassword(int(os.Stdin.Fd()))
+	b, err := terminal.ReadPassword(int(ttyin.Fd()))
 	if err != nil {
 		return "", fmt.Errorf("failed to read password: %s", err)
 	}
 
-	fmt.Print("\n")
+	fmt.Fprint(ttyout, "\n")
 
 	return string(b), nil
 }
@@ -237,6 +237,12 @@ func (ms *MinSSH) verifyAndAppendNew(hostname string, remote net.Addr, key ssh.P
 }
 
 func (ms *MinSSH) getSigners() (signers []ssh.Signer, err error) {
+	ttyin, ttyout, err := openTTY()
+	if err != nil {
+		return signers, fmt.Errorf("failed to open tty: %s", err)
+	}
+	defer closeTTY(ttyin, ttyout)
+
 	for _, identityFile := range ms.conf.IdentityFiles {
 		identityFile = os.ExpandEnv(identityFile)
 		key, err := ioutil.ReadFile(identityFile)
@@ -254,7 +260,7 @@ func (ms *MinSSH) getSigners() (signers []ssh.Signer, err error) {
 				}
 				continue
 			}
-			password, err := readPassword("password for decrypting key: ")
+			password, err := readPassword(ttyin, ttyout, "password for decrypting key: ")
 			if err != nil {
 				ms.conf.Logger.Printf("failed to decrypt private key: %s\n", err)
 				continue
@@ -279,6 +285,12 @@ func (ms *MinSSH) getSigners() (signers []ssh.Signer, err error) {
 }
 
 func (ms *MinSSH) keyboardInteractiveChallenge(user, instruction string, questions []string, echos []bool) (answers []string, err error) {
+	ttyin, ttyout, err := openTTY()
+	if err != nil {
+		return answers, fmt.Errorf("failed to open tty: %s", err)
+	}
+	defer closeTTY(ttyin, ttyout)
+
 	answers = make([]string, len(questions))
 	var strs []string
 	if len(questions) > 0 {
@@ -289,13 +301,13 @@ func (ms *MinSSH) keyboardInteractiveChallenge(user, instruction string, questio
 			strs = append(strs)
 		}
 		if len(strs) > 0 {
-			fmt.Println(strings.Join(strs, " "))
+			fmt.Fprintln(ttyout, strings.Join(strs, " "))
 		} else {
-			fmt.Printf("Keyboard interactive challenge for %s@%s\n", ms.conf.User, ms.conf.Host)
+			fmt.Fprintf(ttyout, "Keyboard interactive challenge for %s@%s\n", ms.conf.User, ms.conf.Host)
 		}
 	}
 	for i, q := range questions {
-		res, err := readPassword(q)
+		res, err := readPassword(ttyin, ttyout, q)
 		if err != nil {
 			return answers, err
 		}
@@ -305,8 +317,14 @@ func (ms *MinSSH) keyboardInteractiveChallenge(user, instruction string, questio
 }
 
 func (ms *MinSSH) passwordCallback() (secret string, err error) {
-	fmt.Printf("Password authentication for %s@%s\n", ms.conf.User, ms.conf.Host)
-	return readPassword("Password: ")
+	ttyin, ttyout, err := openTTY()
+	if err != nil {
+		return secret, fmt.Errorf("failed to open tty: %s", err)
+	}
+	defer closeTTY(ttyin, ttyout)
+
+	fmt.Fprintf(ttyout, "Password authentication for %s@%s\n", ms.conf.User, ms.conf.Host)
+	return readPassword(ttyin, ttyout, "Password: ")
 }
 
 func (ms *MinSSH) Close() {
@@ -473,6 +491,65 @@ func (ms *MinSSH) printExitMessage(err error) {
 	} else {
 		fmt.Println("successfully")
 	}
+}
+
+func (ms *MinSSH) Run() (err error) {
+	if ms.conf.Command != "" {
+		err = ms.RunCommand()
+	} else {
+		err = ms.RunInteractive()
+	}
+	return
+}
+
+func (ms *MinSSH) RunCommand() error {
+	ms.sess.Stdin = os.Stdin
+	ms.sess.Stdout = os.Stdout
+	ms.sess.Stderr = os.Stderr
+
+	sigC := ms.watchSignals()
+	defer func() {
+		signal.Stop(sigC)
+	}()
+
+	sessC := make(chan error)
+	go func() {
+		sessC <- ms.sess.Run(ms.conf.Command)
+	}()
+
+	select {
+	case <-sigC:
+		fmt.Println("got signal")
+	case err := <-sessC:
+		ms.printExitMessage(err)
+	}
+
+	return nil
+}
+
+func (ms *MinSSH) RunSubsystem() error {
+	ms.sess.Stdin = os.Stdin
+	ms.sess.Stdout = os.Stdout
+	ms.sess.Stderr = os.Stderr
+
+	sigC := ms.watchSignals()
+	defer func() {
+		signal.Stop(sigC)
+	}()
+
+	sessC := make(chan error)
+	go func() {
+		sessC <- ms.sess.RequestSubsystem(ms.conf.Command)
+	}()
+
+	select {
+	case <-sigC:
+		fmt.Println("got signal")
+	case err := <-sessC:
+		ms.printExitMessage(err)
+	}
+
+	return nil
 }
 
 func (ms *MinSSH) RunInteractive() error {
