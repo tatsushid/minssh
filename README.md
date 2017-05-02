@@ -6,11 +6,11 @@ Linux, macOS and __Windows__.
 
 ## Features
 
-- Only support interactive shell mode
+- Support command, subsystem and interactive shell mode
 - Work on Windows Command Prompt and PowerShell (Especially work well on
   Windows 10 AU or later)
 - Can read OpenSSH `known_hosts` file and verify host
-- Support public key, keyboard interactive and password authentication
+- Support OpenSSH public key, keyboard interactive and password authentication
 
 ## Install
 
