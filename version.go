@@ -1,7 +1,7 @@
 package main
 
 // version string of the command
-const Version string = "v0.1.0"
+const Version string = "v0.2.0"
 
 var (
 	// git commit hash embedded by packaging script

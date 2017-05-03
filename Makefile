@@ -1,5 +1,5 @@
 TARGET   := minssh
-VERSION  := v0.1.0
+VERSION  := v0.2.0
 GOX_OS   := linux darwin windows
 GOX_ARCH := 386 amd64
 DATE     := $(shell date +%FT%T%z)
