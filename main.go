@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bburgin/minssh/pkg/minssh"
+	"github.com/tatsushid/minssh/pkg/minssh"
 )
 
 var defaultKnownHostsFiles = []string{
