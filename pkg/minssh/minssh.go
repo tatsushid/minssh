@@ -52,42 +52,80 @@ func IsTerminal() (bool, error) {
 	return true, nil
 }
 
-func readPassword(ttyin, ttyout *os.File, prompt string) (password string, err error) {
-	state, err := terminal.GetState(int(ttyin.Fd()))
-	if err != nil {
-		return "", fmt.Errorf("failed to get terminal state: %s", err)
-	}
-
-	stopC := make(chan struct{})
-	defer func() {
-		close(stopC)
-	}()
-
-	go func() {
-		sigC := make(chan os.Signal, 1)
-		signal.Notify(sigC, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-		select {
-		case <-sigC:
-			terminal.Restore(int(ttyin.Fd()), state)
-			os.Exit(1)
-		case <-stopC:
-		}
-	}()
-
-	if prompt == "" {
-		fmt.Fprint(ttyout, "Password: ")
+func isStdinValid() (isValid bool) {
+	stat, _ := os.Stdin.Stat()
+	if stat != nil {
+		isValid = true
 	} else {
-		fmt.Fprint(ttyout, prompt)
+		isValid = false
 	}
+	return
+}
 
-	b, err := terminal.ReadPassword(int(ttyin.Fd()))
-	if err != nil {
-		return "", fmt.Errorf("failed to read password: %s", err)
+func directedPrintf(quietMode bool,
+		ttyout *os.File,
+		stringToPrint string) () {
+	if !quietMode {
+		if ttyout != nil {
+			fmt.Fprintf(ttyout, stringToPrint)
+		} else {
+			// ttyout is not open;
+			// so just call Printf here
+			fmt.Printf(stringToPrint)
+		}
+	} else {
+		// do nothing here, since suppressing prints
 	}
+}
 
-	fmt.Fprint(ttyout, "\n")
+func readPassword(ms *MinSSH, ttyin, ttyout *os.File, prompt string) (password string, err error) {
+	pwd := ""
+	if ms.conf.PromptUserForPassword {
+		state, err := terminal.GetState(int(ttyin.Fd()))
+		if err != nil {
+			return "", fmt.Errorf("failed to get terminal state: %s", err)
+		}
 
-	return string(b), nil
+		stopC := make(chan struct{})
+		defer func() {
+			close(stopC)
+		}()
+
+		go func() {
+			sigC := make(chan os.Signal, 1)
+			signal.Notify(sigC, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+			select {
+			case <-sigC:
+				terminal.Restore(int(ttyin.Fd()), state)
+				os.Exit(1)
+			case <-stopC:
+			}
+		}()
+
+		if prompt == "" {
+			directedPrintf(ms.conf.QuietMode, ttyout, "Password: ")
+		} else {
+			directedPrintf(ms.conf.QuietMode, ttyout, prompt)
+		}
+
+		b, err := terminal.ReadPassword(int(ttyin.Fd()))
+		pwd = string(b)
+		if err != nil {
+			return "", fmt.Errorf("failed to read password: %s", err)
+		}
+
+		directedPrintf(ms.conf.QuietMode, ttyout, "\n")
+
+	} else {
+		// use password from options
+		pwd = ms.conf.Password
+		directedPrintf(
+			ms.conf.QuietMode,
+			ttyout,
+			"Using password from options\n")
+	}
+	
+	return pwd, nil
 }
 
 func askAddingUnknownHostKey(address string, remote net.Addr, key ssh.PublicKey) (bool, error) {
@@ -207,12 +245,14 @@ func (ms *MinSSH) verifyAndAppendNew(hostname string, remote net.Addr, key ssh.P
 		return err
 	}
 
-	if answer, err := askAddingUnknownHostKey(hostname, remote, key); err != nil || !answer {
-		msg := "host key verification failed"
-		if err != nil {
-			msg += ": " + err.Error()
+	if ms.conf.StrictHostKeyChecking {
+		if answer, err := askAddingUnknownHostKey(hostname, remote, key); err != nil || !answer {
+			msg := "host key verification failed"
+			if err != nil {
+				msg += ": " + err.Error()
+			}
+			return fmt.Errorf(msg)
 		}
-		return fmt.Errorf(msg)
 	}
 
 	f, err := os.OpenFile(ms.conf.KnownHostsFiles[0], os.O_WRONLY|os.O_APPEND, 0600)
@@ -237,12 +277,17 @@ func (ms *MinSSH) verifyAndAppendNew(hostname string, remote net.Addr, key ssh.P
 }
 
 func (ms *MinSSH) getSigners() (signers []ssh.Signer, err error) {
-	ttyin, ttyout, err := openTTY()
-	if err != nil {
-		return signers, fmt.Errorf("failed to open tty: %s", err)
+	ttyin := (*os.File)(nil)
+	ttyout := (*os.File)(nil)
+	err = (error)(nil)
+	if ms.conf.PromptUserForPassword {
+		ttyin, ttyout, err = openTTY()
+		if err != nil {
+			return signers, fmt.Errorf("failed to open tty: %s", err)
+		}
+		defer closeTTY(ttyin, ttyout)
 	}
-	defer closeTTY(ttyin, ttyout)
-
+	
 	for _, identityFile := range ms.conf.IdentityFiles {
 		identityFile = os.ExpandEnv(identityFile)
 		key, err := ioutil.ReadFile(identityFile)
@@ -260,7 +305,7 @@ func (ms *MinSSH) getSigners() (signers []ssh.Signer, err error) {
 				}
 				continue
 			}
-			password, err := readPassword(ttyin, ttyout, "password for decrypting key: ")
+			password, err := readPassword(ms, ttyin, ttyout, "password for decrypting key: ")
 			if err != nil {
 				ms.conf.Logger.Printf("failed to decrypt private key: %s\n", err)
 				continue
@@ -285,12 +330,17 @@ func (ms *MinSSH) getSigners() (signers []ssh.Signer, err error) {
 }
 
 func (ms *MinSSH) keyboardInteractiveChallenge(user, instruction string, questions []string, echos []bool) (answers []string, err error) {
-	ttyin, ttyout, err := openTTY()
-	if err != nil {
-		return answers, fmt.Errorf("failed to open tty: %s", err)
+	ttyin := (*os.File)(nil)
+	ttyout := (*os.File)(nil)
+	err = (error)(nil)
+	if ms.conf.PromptUserForPassword {
+		ttyin, ttyout, err = openTTY()
+		if err != nil {
+			return answers, fmt.Errorf("failed to open tty: %s", err)
+		}
+		defer closeTTY(ttyin, ttyout)
 	}
-	defer closeTTY(ttyin, ttyout)
-
+	
 	answers = make([]string, len(questions))
 	var strs []string
 	if len(questions) > 0 {
@@ -301,13 +351,23 @@ func (ms *MinSSH) keyboardInteractiveChallenge(user, instruction string, questio
 			strs = append(strs)
 		}
 		if len(strs) > 0 {
-			fmt.Fprintln(ttyout, strings.Join(strs, " "))
+			directedPrintf(
+				ms.conf.QuietMode,
+				ttyout,
+				strings.Join(strs, " ") + "\n")
 		} else {
-			fmt.Fprintf(ttyout, "Keyboard interactive challenge for %s@%s\n", ms.conf.User, ms.conf.Host)
+			stringToPrint := fmt.Sprintf(
+				"Keyboard interactive challenge for %s@%s\n",
+				ms.conf.User,
+				ms.conf.Host)
+			directedPrintf(
+				ms.conf.QuietMode,
+				ttyout,
+				stringToPrint)
 		}
 	}
 	for i, q := range questions {
-		res, err := readPassword(ttyin, ttyout, q)
+		res, err := readPassword(ms, ttyin, ttyout, q)
 		if err != nil {
 			return answers, err
 		}
@@ -317,14 +377,26 @@ func (ms *MinSSH) keyboardInteractiveChallenge(user, instruction string, questio
 }
 
 func (ms *MinSSH) passwordCallback() (secret string, err error) {
-	ttyin, ttyout, err := openTTY()
-	if err != nil {
-		return secret, fmt.Errorf("failed to open tty: %s", err)
+	ttyin := (*os.File)(nil)
+	ttyout := (*os.File)(nil)
+	err = (error)(nil)
+	if ms.conf.PromptUserForPassword {
+		ttyin, ttyout, err = openTTY()
+		if err != nil {
+			return secret, fmt.Errorf("failed to open tty: %s", err)
+		}
+		defer closeTTY(ttyin, ttyout)
 	}
-	defer closeTTY(ttyin, ttyout)
-
-	fmt.Fprintf(ttyout, "Password authentication for %s@%s\n", ms.conf.User, ms.conf.Host)
-	return readPassword(ttyin, ttyout, "Password: ")
+	
+	stringToPrint := fmt.Sprintf(
+		"Password authentication for %s@%s\n",
+		ms.conf.User,
+		ms.conf.Host)
+	directedPrintf(
+		ms.conf.QuietMode,
+		ttyout,
+		stringToPrint)
+	return readPassword(ms, ttyin, ttyout, "Password: ")
 }
 
 func (ms *MinSSH) Close() {
@@ -478,18 +550,32 @@ func (ms *MinSSH) invokeInOutPipes() {
 }
 
 func (ms *MinSSH) printExitMessage(err error) {
-	fmt.Printf("ssh connection to %s closed ", ms.conf.Host)
+	stringToPrint := fmt.Sprintf(
+		"ssh connection to %s closed ",
+		ms.conf.Host)
 	if err != nil {
 		switch e := err.(type) {
 		case *ssh.ExitMissingError:
-			fmt.Printf("but remote didn't send exit status: %s\n", e)
+			stringToPrint += fmt.Sprintf(
+				"but remote didn't send exit status: %s\n", e)
 		case *ssh.ExitError:
-			fmt.Printf("with error: %s\n", e)
+			stringToPrint += fmt.Sprintf(
+				"with error: %s\n", e)
 		default:
-			fmt.Printf("with unknown error: %s\n", err)
+			stringToPrint += fmt.Sprintf(
+				"with unknown error: %s\n", err)
 		}
+		// always print errors, so call Printf here
+		fmt.Printf(stringToPrint)
 	} else {
-		fmt.Println("successfully")
+		stringToPrint += "successfully\n"
+		// no tty object here, so pass in nil
+		ttyout := (*os.File)(nil)
+		// conditionally print success messages
+		directedPrintf(
+			ms.conf.QuietMode,
+			ttyout,
+			stringToPrint)
 	}
 }
 
@@ -503,7 +589,15 @@ func (ms *MinSSH) Run() (err error) {
 }
 
 func (ms *MinSSH) RunCommand() error {
-	ms.sess.Stdin = os.Stdin
+	if isStdinValid() {
+		ms.sess.Stdin = os.Stdin
+	} else {
+		// if stdin is not valid,
+		// pass nil to sess;
+		// this avoids sess returning an 
+		// invalid handle error
+		ms.sess.Stdin = nil
+	}
 	ms.sess.Stdout = os.Stdout
 	ms.sess.Stderr = os.Stderr
 
@@ -528,7 +622,15 @@ func (ms *MinSSH) RunCommand() error {
 }
 
 func (ms *MinSSH) RunSubsystem() error {
-	ms.sess.Stdin = os.Stdin
+	if isStdinValid() {
+		ms.sess.Stdin = os.Stdin
+	} else {
+		// if stdin is not valid,
+		// pass nil to sess;
+		// this avoids sess returning an 
+		// invalid handle error
+		ms.sess.Stdin = nil
+	}
 	ms.sess.Stdout = os.Stdout
 	ms.sess.Stderr = os.Stderr
 
