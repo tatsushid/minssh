@@ -7,15 +7,19 @@ import (
 )
 
 type Config struct {
-	User            string
-	Host            string
-	Port            int
-	Logger          *log.Logger
-	KnownHostsFiles []string
-	IdentityFiles   []string
-	Command         string
-	IsSubsystem     bool
-	NoTTY           bool
+	User                  string
+	PromptUserForPassword bool
+	Password              string
+	Host                  string
+	Port                  int
+	Logger                *log.Logger
+	StrictHostKeyChecking bool
+	KnownHostsFiles       []string
+	IdentityFiles         []string
+	Command               string
+	QuietMode             bool
+	IsSubsystem           bool
+	NoTTY                 bool
 }
 
 func NewConfig() *Config {
@@ -24,6 +28,8 @@ func NewConfig() *Config {
 		Host:   "",
 		Port:   22,
 		Logger: log.New(ioutil.Discard, "minssh ", log.LstdFlags),
+		PromptUserForPassword: true,
+		StrictHostKeyChecking: true,
 	}
 }
 

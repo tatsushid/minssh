@@ -7,10 +7,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 
-	"github.com/tatsushid/minssh/pkg/minssh"
+	"github.com/bburgin/minssh/pkg/minssh"
 )
 
 var defaultKnownHostsFiles = []string{
@@ -23,6 +25,51 @@ var defaultIdentityFiles = []string{
 	"id_dsa",
 	"id_ecdsa",
 	"id_ed25519",
+}
+
+func getValidOptions() (validOptions map[string]map[string]string) {
+	validOptions = make(map[string]map[string]string)
+	validOptions["StrictHostKeyChecking"] = map[string]string{
+		"valids": "yes or no",
+		"default": "yes",
+	}
+	validOptions["Password"] = map[string]string{
+		"valids": "any string",
+		"default": "no password",
+	}
+	return
+}
+
+func getOptionData() (
+		validOptions map[string]map[string]string,
+		validOptionKeys []string,
+		optionsMsg string) {
+	optionsMsg = "Use `option` to specify options for which there is no separate\n"
+	optionsMsg += "	command-line flag. This can be called multiple times.\n"
+	optionsMsg += "\tValid options:\n"
+	validOptions = getValidOptions()
+	validOptionKeys = make([]string, 0, len(validOptions))
+	for key := range validOptions {
+		validOptionKeys = append(validOptionKeys, key)
+	}
+	sort.Strings(validOptionKeys)
+	for keyIndex := range validOptionKeys {
+		key := validOptionKeys[keyIndex]
+		optionsMsg += fmt.Sprintf("\t%s=%s, default is %s\n",
+		key,
+		validOptions[key]["valids"],
+		validOptions[key]["default"])
+	}
+	return
+}
+
+func appendValidsMsg(valids string,
+		option string,
+		msgIn string) (msgOut string) {
+	msgOut = msgIn
+	msgOut += "   Valid values:\n"
+	msgOut += "   " + valids + "\n"
+	return
 }
 
 type strSliceValue []string
@@ -93,13 +140,18 @@ func (a *app) initApp() (err error) {
 
 func (a *app) parseArgs() (err error) {
 	var (
+		options         []string
 		logPath         string
 		useOpenSSHFiles bool
 		showVersion     bool
 	)
 
+	validOptions, validOptionKeys, optionsMsg := getOptionData()
+
 	a.flagSet.Var((*strSliceValue)(&a.conf.IdentityFiles), "i", "use `identity_file` for public key authentication. this can be called multiple times")
+	a.flagSet.Var((*strSliceValue)(&options), "o", optionsMsg)
 	a.flagSet.IntVar(&a.conf.Port, "p", 22, "specify ssh server `port`")
+	a.flagSet.BoolVar(&a.conf.QuietMode, "q", false, "Quiet mode. Suppresses most warning and diagnostic messages, default is false.")
 	a.flagSet.BoolVar(&a.conf.IsSubsystem, "s", false, "treat command as subsystem")
 	a.flagSet.StringVar(&logPath, "E", "", "specify `log_file` path. if it isn't set, it discards all log outputs")
 	a.flagSet.BoolVar(&useOpenSSHFiles, "U", false, "use keys and known_hosts files in OpenSSH's '.ssh' directory")
@@ -127,6 +179,59 @@ func (a *app) parseArgs() (err error) {
 				}
 			}
 		}
+	}
+
+	errorMsg := ""
+	for _, option := range options {
+		var rex = regexp.MustCompile("(\\w+)=(.*)")
+		data := rex.FindAllStringSubmatch(option, -1)
+		if len(data) > 0 {
+			for _, keyVal := range data {
+				key := keyVal[1]
+				val := keyVal[2]
+				switch key {
+				case "StrictHostKeyChecking":
+					switch val {
+					case "yes":
+						a.conf.StrictHostKeyChecking = true
+					case "no":
+						a.conf.StrictHostKeyChecking = false
+					default:
+						invalidValMsg := "Option %s has invalid value: %s\n"
+						invalidValMsg = appendValidsMsg(
+							validOptions[key]["valids"],
+							key,
+							invalidValMsg)
+						errorMsg += fmt.Sprintf(invalidValMsg, key, val)
+					}
+				case "Password":
+					a.conf.PromptUserForPassword = false
+					a.conf.Password = val
+				default:
+					invalidOptionMsg := "Unknown option: %s\n"
+					validsString := ""
+					for keyIndex := range validOptionKeys {
+						key := validOptionKeys[keyIndex]
+						if keyIndex > 0 {
+							validsString += ", "
+						}
+						validsString += key
+					}
+					invalidOptionMsg = appendValidsMsg(
+						validsString,
+						"options",
+						invalidOptionMsg)
+					errorMsg += fmt.Sprintf(invalidOptionMsg, key)
+				}
+			}
+		} else {
+			invalidSyntaxMsg := "Option %s has invalid syntax\n"
+			invalidSyntaxMsg += "   Please specify an option as a key=value pair\n"
+			errorMsg += fmt.Sprintf(invalidSyntaxMsg, option)
+		}
+	}
+	if len(errorMsg) > 0 {
+		return fmt.Errorf(errorMsg)
 	}
 
 	if useOpenSSHFiles {
